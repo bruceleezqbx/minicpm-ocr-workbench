@@ -423,6 +423,8 @@ def open_window(services: list[Service], app_url: str, selftest: bool = False) -
             " root: !!document.querySelector('#root'),"
             " kids: document.querySelector('#root') ? document.querySelector('#root').children.length : 0,"
             " upload: !!document.querySelector('input[type=file]'),"
+            " bridge: typeof window.pywebview !== 'undefined',"
+            " shell: new URLSearchParams(location.search).get('shell'),"
             " text: (document.body.innerText || '').slice(0, 160)"
             "})"
         )
@@ -444,8 +446,15 @@ def open_window(services: list[Service], app_url: str, selftest: bool = False) -
                 continue
             log(f"自检 title={info.get('title')!r} href={info.get('href')!r}")
             log(f"自检 root_children={info.get('kids')} file_input={info.get('upload')}")
+            log(
+                f"自检 桌面桥={info.get('bridge')} shell标记={info.get('shell')!r}"
+                "（下载功能依赖这两项）"
+            )
             log(f"自检 页面文字：{(info.get('text') or '').strip()[:140]!r}")
             ok = bool(info.get("kids")) and bool(info.get("upload"))
+            if info.get("shell") == "desktop" and not info.get("bridge"):
+                log("自检结果：未通过（窗口里有 shell 标记但拿不到 JS 桥，下载会失败）")
+                ok = False
             log(f"自检结果：{'通过' if ok else '未通过（页面可能没渲染完）'}")
             break
         else:

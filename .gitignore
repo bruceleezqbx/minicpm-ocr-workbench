@@ -3,7 +3,10 @@
 models/
 
 # 上游源码副本与第三方二进制工具（体积大，各自带自己的许可）
-sources/
+# 若要把上游源码一并入库，只放行 MiniCPM-OCR-main 这一棵目录，
+# 其内部的 node_modules/dist/__pycache__ 由那份目录自带的 .gitignore 负责。
+sources/*
+!sources/MiniCPM-OCR-main/
 
 # Python 虚拟环境
 .minicpm-ocr/

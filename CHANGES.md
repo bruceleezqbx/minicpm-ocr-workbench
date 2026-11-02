@@ -112,7 +112,11 @@ git apply --whitespace=nowarn E:\OCR\upstream-local.patch
 ## 四、不属于本仓的东西
 
 * **模型权重**：`models\` 下的 GGUF 来自 ModelScope，上游声明其权重同样适用 Apache-2.0。
-* **第三方二进制**：`sources\ollama-0.40.12`（MIT）、`sources\llama-b12032`（MIT）、
+* **第三方二进制**：`sources\ollama-0.40.12`（MIT，Copyright (c) Ollama）、
+  `sources\llama-b12032`（MIT，Copyright (c) 2023-2026 The ggml authors）、
   `sources\pandoc`（官方 zip 内附 `COPYING.rtf`，为 GNU GPL v2 全文；单独可执行文件，
   未修改未链接，随本仓分发时保留其许可）。
-* **Python / Node 依赖**：各 venv 与 `node_modules` 内保留各自原始许可。
+  注：本机下载的分发包内**未附**这些 LICENSE 文本，此处许可信息取自各自上游仓库的 LICENSE。
+* **模型权重**：`models\` 下的 GGUF 来自 ModelScope；上游声明其权重同样适用 Apache-2.0。
+  权重**不入本仓**（单文件 800MB–1.2GB，超 GitHub 单文件 100MB 限制），
+  用 `scripts\fetch-models.ps1` 按需下载。

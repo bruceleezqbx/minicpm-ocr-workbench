@@ -1,0 +1,21 @@
+# ── 本机部署层加的仓库卫生规则 ─────────────────────────────────────────
+# 上游仓库本身没有 .gitignore，不补的话下面这些东西会被一并提交：
+#   node_modules 317MB、dist 26MB、__pycache__、运行时 job 数据。
+
+# 前端依赖与构建产物
+webdemo/frontend/node_modules/
+webdemo/frontend/dist/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时产物（job 目录、page worker 注册表等）
+webdemo/backend/data/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

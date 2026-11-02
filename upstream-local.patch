@@ -784,7 +784,7 @@ index 995c2b2..1438109 100644
    localStorage.setItem(TOKEN_KEY, DEMO_TOKEN);
  }
 diff --git a/webdemo/frontend/src/i18n/messages/playground.ts b/webdemo/frontend/src/i18n/messages/playground.ts
-index 97108ea..75559a8 100644
+index 97108ea..896a938 100644
 --- a/webdemo/frontend/src/i18n/messages/playground.ts
 +++ b/webdemo/frontend/src/i18n/messages/playground.ts
 @@ -1,3 +1,7 @@
@@ -804,7 +804,7 @@ index 97108ea..75559a8 100644
    imageParseKieTourExampleTitle: '选择票据示例或上传文件',
    imageParseKieTourExampleBody:
      '可以先选择平台票据示例，系统会自动预填常用字段；也可以直接上传图片或 PDF。',
-@@ -396,7 +400,8 @@ const zhCN = {
+@@ -396,8 +400,10 @@ const zhCN = {
      '这不代表内容已经确认正确。可查看有分数的区块，或继续对照原图自行复核。',
    imageParseSource: 'Markdown 源码',
    imageParseDownload: '下载',
@@ -812,9 +812,11 @@ index 97108ea..75559a8 100644
 +  imageParseDownloadHint:
 +    '选择 Markdown、JSON 或 Word 格式导出当前识别结果；「Word（公式可编辑）」导出的是 Word 原生公式，可继续编辑',
    imageParseDownloading: '正在生成文件',
++  imageParseDownloadSaved: '已保存到 {{path}}',
    imageParseDownloadFailed: '文件生成失败，请重试。',
    imageParseEmpty: '暂无解析结果',
-@@ -1157,7 +1162,7 @@ const enUS = {
+   imageParseEmptyHint: '上传图片或 PDF 后由真实文档解析模型生成对照结果。',
+@@ -1157,7 +1163,7 @@ const enUS = {
      'Double-click any content block in the result pane to edit the recognized text. Changes are saved when you leave the block and are included in copies and downloads.',
    imageParseTourExportTitle: 'Take your results with you',
    imageParseTourExportBody:
@@ -823,7 +825,7 @@ index 97108ea..75559a8 100644
    imageParseKieTourExampleTitle: 'Choose a receipt sample or upload a file',
    imageParseKieTourExampleBody:
      'Start with a platform receipt sample to prefill common fields, or upload an image or PDF directly.',
-@@ -1287,7 +1292,8 @@ const enUS = {
+@@ -1287,8 +1293,10 @@ const enUS = {
      'This does not confirm correctness. Browse scored blocks or compare with the original image.',
    imageParseSource: 'Markdown source',
    imageParseDownload: 'Download',
@@ -831,8 +833,10 @@ index 97108ea..75559a8 100644
 +  imageParseDownloadHint:
 +    'Export the current result as Markdown, JSON, or Word. "Word（公式可编辑）" produces native Word equations you can keep editing.',
    imageParseDownloading: 'Generating file',
++  imageParseDownloadSaved: 'Saved to {{path}}',
    imageParseDownloadFailed: 'Could not generate the file. Please try again.',
    imageParseEmpty: 'No parsed result yet',
+   imageParseEmptyHint: 'Upload an image or PDF to generate a real model comparison result.',
 diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx
 index c6d91c2..6d85a5e 100644
 --- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx
@@ -960,7 +964,7 @@ index 6ecdd0d..001cbae 100644
              onDragOver={onDragOver as DragEventHandler<HTMLInputElement> | undefined}
              onDragLeave={onDragLeave as DragEventHandler<HTMLInputElement> | undefined}
 diff --git a/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts b/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
-index 62b409d..60486ca 100644
+index 62b409d..e11360e 100644
 --- a/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
 +++ b/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
 @@ -1,3 +1,7 @@
@@ -979,6 +983,23 @@ index 62b409d..60486ca 100644
    page?: number;
    disabled: boolean;
  }
+@@ -34,7 +37,15 @@ export function useImageParseDownload(input: ImageParseDownloadInput) {
+     setDownloading(true);
+     try {
+       const blob = await createImageParseExport(format, input);
+-      saveImageParseExport(blob, imageParseExportFileName(input.name, format, input.page));
++      const saved = await saveImageParseExport(
++        blob,
++        imageParseExportFileName(input.name, format, input.page),
++      );
++      // 桌面壳里文件是 Python 直接写到磁盘的，给用户看落盘位置；
++      // 浏览器走系统下载，浏览器自己会提示，这里不再打扰。
++      if (saved?.path) {
++        toast({ title: t('imageParseDownloadSaved', { path: saved.path }) });
++      }
+     } catch {
+       toast({ title: t('imageParseDownloadFailed'), variant: 'error' });
+     } finally {
 diff --git a/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts b/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts
 index 8c6f841..577a9d2 100644
 --- a/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts
@@ -1056,7 +1077,7 @@ index f5ffdc0..e916c1b 100644
    };
  }
 diff --git a/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts b/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
-index eb4b76c..c42a9eb 100644
+index eb4b76c..93f0e3f 100644
 --- a/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
 +++ b/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
 @@ -1,15 +1,21 @@
@@ -1111,6 +1132,119 @@ index eb4b76c..c42a9eb 100644
    if (format === 'markdown')
      return new Blob([input.markdown], { type: 'text/markdown;charset=utf-8' });
  
+@@ -90,11 +111,102 @@ export async function createImageParseExport(
+ }
+ 
+ /**
+- * Start a local download and release the object URL after a delay, leaving the browser time to consume the file.
+- * @param blob file content
+- * @param fileName download file name
++ * pywebview 注入的 JS 桥，只有桌面壳里才有（浏览器里 window.pywebview 是 undefined）。
++ *
++ * 桌面壳用 Edge WebView2，而 pywebview 没有接 CoreWebView2.DownloadStarting，
++ * 所以 WebView2 会静默掐掉浏览器的下载机制：blob 链接不落盘，
++ * 带 Content-Disposition 的跳转也不落盘，点下载毫无反应。
++ * 因此桌面壳里改走这条 JS->Python 桥，由 Python 直接把文件写到磁盘。
++ */
++interface DesktopBridge {
++  api?: {
++    save_bytes?: (
++      filename: string,
++      contentBase64: string,
++    ) => Promise<{ ok: boolean; path?: string; bytes?: number; error?: string }>;
++  };
++}
++
++/**
++ * 桌面壳里落盘后的结果。
+  */
+-export function saveImageParseExport(blob: Blob, fileName: string): void {
++export interface ImageParseExportSaveResult {
++  /** 桌面壳写盘后的绝对路径；浏览器下载时为空。 */
++  path?: string;
++}
++
++/**
++ * 是否运行在桌面壳里。
++ *
++ * 桌面壳打开工作台时会带 ?shell=desktop（见 scripts/desktop_app.py），
++ * 这样在模块加载时就能同步判定，浏览器里不会为等桌面桥白等几秒。
++ */
++const DESKTOP_SHELL =
++  typeof window !== 'undefined' &&
++  new URLSearchParams(window.location.search).get('shell') === 'desktop';
++
++function desktopBridge(): DesktopBridge['api'] | undefined {
++  if (typeof window === 'undefined') return undefined;
++  return (window as Window & { pywebview?: DesktopBridge }).pywebview?.api;
++}
++
++/**
++ * 拿桌面桥。桌面壳里 pywebview 注入 JS 桥可能比页面渲染晚一点，轮询等它就绪。
++ * @param timeoutMs 最长等待时间
++ * @returns 桌面桥的 api；不在桌面壳里、或等不到就返回 undefined
++ */
++async function waitForDesktopBridge(timeoutMs = 8000): Promise<DesktopBridge['api'] | undefined> {
++  if (!DESKTOP_SHELL) return undefined;
++  const deadline = Date.now() + timeoutMs;
++  while (Date.now() < deadline) {
++    const api = desktopBridge();
++    if (api?.save_bytes) return api;
++    await new Promise((resolve) => {
++      window.setTimeout(resolve, 100);
++    });
++  }
++  return undefined;
++}
++
++/**
++ * Blob 转 base64。分块拼，避免大文件一次性展开导致调用栈溢出。
++ * @param blob 文件内容
++ * @returns base64 字符串
++ */
++async function blobToBase64(blob: Blob): Promise<string> {
++  const bytes = new Uint8Array(await blob.arrayBuffer());
++  const chunk = 0x8000;
++  let binary = '';
++  for (let i = 0; i < bytes.length; i += chunk) {
++    const slice = bytes.subarray(i, i + chunk);
++    let piece = '';
++    for (let j = 0; j < slice.length; j += 1) piece += String.fromCharCode(slice[j]);
++    binary += piece;
++  }
++  return btoa(binary);
++}
++
++/**
++ * 保存导出结果：桌面壳走 JS 桥由 Python 落盘，浏览器走官方那套 blob 下载。
++ * @param blob 文件内容
++ * @param fileName 下载文件名
++ * @returns 桌面壳落盘时的文件路径
++ */
++export async function saveImageParseExport(
++  blob: Blob,
++  fileName: string,
++): Promise<ImageParseExportSaveResult> {
++  const bridge = await waitForDesktopBridge();
++  if (bridge?.save_bytes) {
++    const result = await bridge.save_bytes(fileName, await blobToBase64(blob));
++    if (!result?.ok) throw new Error(result?.error || 'imageParseDownloadFailed');
++    return { path: result.path };
++  }
++  if (DESKTOP_SHELL) {
++    // 在桌面壳里却拿不到 JS 桥：走浏览器下载是不落盘的，直接报错让用户看见。
++    throw new Error('imageParseDownloadFailed');
++  }
++
+   const url = URL.createObjectURL(blob);
+   const link = document.createElement('a');
+   link.href = url;
+@@ -106,4 +218,5 @@ export function saveImageParseExport(blob: Blob, fileName: string): void {
+     link.remove();
+     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+   }
++  return {};
+ }
 diff --git a/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts b/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts
 index 0e3040b..e97ad51 100644
 --- a/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts

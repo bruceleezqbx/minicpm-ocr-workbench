@@ -37,7 +37,15 @@ export function useImageParseDownload(input: ImageParseDownloadInput) {
     setDownloading(true);
     try {
       const blob = await createImageParseExport(format, input);
-      saveImageParseExport(blob, imageParseExportFileName(input.name, format, input.page));
+      const saved = await saveImageParseExport(
+        blob,
+        imageParseExportFileName(input.name, format, input.page),
+      );
+      // 桌面壳里文件是 Python 直接写到磁盘的，给用户看落盘位置；
+      // 浏览器走系统下载，浏览器自己会提示，这里不再打扰。
+      if (saved?.path) {
+        toast({ title: t('imageParseDownloadSaved', { path: saved.path }) });
+      }
     } catch {
       toast({ title: t('imageParseDownloadFailed'), variant: 'error' });
     } finally {

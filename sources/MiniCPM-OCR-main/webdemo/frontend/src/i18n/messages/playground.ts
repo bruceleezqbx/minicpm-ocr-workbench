@@ -403,6 +403,7 @@ const zhCN = {
   imageParseDownloadHint:
     '选择 Markdown、JSON 或 Word 格式导出当前识别结果；「Word（公式可编辑）」导出的是 Word 原生公式，可继续编辑',
   imageParseDownloading: '正在生成文件',
+  imageParseDownloadSaved: '已保存到 {{path}}',
   imageParseDownloadFailed: '文件生成失败，请重试。',
   imageParseEmpty: '暂无解析结果',
   imageParseEmptyHint: '上传图片或 PDF 后由真实文档解析模型生成对照结果。',
@@ -1295,6 +1296,7 @@ const enUS = {
   imageParseDownloadHint:
     'Export the current result as Markdown, JSON, or Word. "Word（公式可编辑）" produces native Word equations you can keep editing.',
   imageParseDownloading: 'Generating file',
+  imageParseDownloadSaved: 'Saved to {{path}}',
   imageParseDownloadFailed: 'Could not generate the file. Please try again.',
   imageParseEmpty: 'No parsed result yet',
   imageParseEmptyHint: 'Upload an image or PDF to generate a real model comparison result.',

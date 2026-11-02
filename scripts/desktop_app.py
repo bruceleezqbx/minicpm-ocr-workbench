@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import subprocess
 import sys
@@ -221,6 +222,55 @@ def stop_services(services: list[Service]) -> None:
 
 
 # ===================================================================
+# 桌面桥：JS -> Python
+# ===================================================================
+
+class DesktopApi:
+    """给工作台页面用的接口。
+
+    桌面壳用的是 Edge WebView2，而 pywebview 没有接 CoreWebView2.DownloadStarting，
+    WebView2 会静默掐掉浏览器的下载机制：blob 链接不落盘，带 Content-Disposition
+    的跳转也不落盘，点"下载"毫无反应。所以桌面壳里改由 Python 直接把文件写到磁盘，
+    页面拿到绝对路径后再提示用户。
+
+    浏览器里这个接口不存在，页面会自动走浏览器自带的下载。
+    """
+
+    def __init__(self, download_dir: Path):
+        self.download_dir = download_dir
+        self.saved: list[str] = []
+
+    def save_bytes(self, filename: str, content_base64: str) -> dict:
+        """把一段 base64 内容写成文件。
+
+        :param filename 文件名（非法字符会被去掉）
+        :param content_base64 文件内容的 base64
+        :returns {"ok": True, "path": 绝对路径, "bytes": 字节数} 或 {"ok": False, "error": ...}
+        """
+        try:
+            safe = "".join(ch for ch in filename if ch not in '\\/:*?"<>|').strip()
+            if not safe:
+                safe = "download"
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+            target = self.download_dir / safe
+            # 同名文件加序号，不覆盖已有的
+            if target.exists():
+                for index in range(1, 1000):
+                    candidate = self.download_dir / f"{target.stem}({index}){target.suffix}"
+                    if not candidate.exists():
+                        target = candidate
+                        break
+            data = base64.b64decode(content_base64)
+            target.write_bytes(data)
+            self.saved.append(str(target))
+            log(f"已保存导出文件: {target}（{len(data)} 字节）")
+            return {"ok": True, "path": str(target), "bytes": len(data)}
+        except Exception as exc:  # noqa: BLE001
+            log(f"保存失败: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+
+# ===================================================================
 # 启动页
 # ===================================================================
 
@@ -296,6 +346,12 @@ def open_window(services: list[Service], app_url: str, selftest: bool = False) -
     """开窗口；服务就绪后切到工作台。"""
     import webview  # 延迟导入，--serve-only 时不需要 GUI 依赖
 
+    download_dir = Path(
+        os.environ.get("OCR_DESKTOP_DOWNLOAD_DIR", str(Path.home() / "Downloads"))
+    )
+    api = DesktopApi(download_dir)
+    log(f"桌面下载目录: {download_dir}")
+
     window = webview.create_window(
         "MiniCPM-OCR 读判工作台",
         html=BOOT_HTML,
@@ -303,6 +359,7 @@ def open_window(services: list[Service], app_url: str, selftest: bool = False) -
         height=920,
         min_size=(1024, 680),
         background_color="#020617",
+        js_api=api,
     )
 
     def bootstrap() -> None:
@@ -346,7 +403,10 @@ def open_window(services: list[Service], app_url: str, selftest: bool = False) -
         log("全部就绪，打开工作台")
         try:
             window.evaluate_js("__setFoot('正在进入工作台...')")
-            window.load_url(app_url)
+            # ?shell=desktop 让前端知道自己在桌面壳里：WebView2 会掐掉浏览器下载机制，
+            # 前端据此改走 JS 桥，由 Python 直接落盘。
+            separator = "&" if "?" in app_url else "?"
+            window.load_url(f"{app_url}{separator}shell=desktop")
         except Exception as exc:  # noqa: BLE001
             log(f"打开工作台失败：{exc}")
             return

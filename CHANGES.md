@@ -39,11 +39,11 @@
 | `src/api/map/request.ts` | 修改 | 新增 `IMAGE_PARSE_LOCAL_BACKEND` 标记（本机部署、单块重识别走本机后端而非云端 L2） |
 | `src/i18n/messages/playground.ts` | 修改 | 下载提示与新手引导文案说明两种 Word 导出的区别（普通 Word 留 LaTeX 源码 /「Word（公式可编辑）」是原生公式） |
 | `utils/imageParseFeatureFlags.ts` | 修改 | 复核入口改为环境变量开关、**默认打开**（官方默认关闭）；设 `VITE_IMAGE_PARSE_REVIEW=false` 可关回 |
-| `utils/imageParseExport.ts` | 修改 | 新增 `word-math` 格式，走本机 `/api/export/word`；入参类型补 `name?: string` |
+| `utils/imageParseExport.ts` | 修改 | 新增 `word-math` 格式，走本机 `/api/export/word`；入参类型补 `name?: string`；**桌面壳下载改走 pywebview JS 桥**（见下） |
 | `utils/imageParseRegenerationRequest.ts` | 修改 | 本机重识别请求改发 `/api/jev/regenerate` 而不是云端 `tts_block` |
 | `hooks/useImageParseRegeneration.ts` | 修改 | 本机不校验云端页面凭证与 API Key |
 | `hooks/useImageParseResultState.ts` | 修改 | 接入 `useImageParseRegeneration`，把重识别能力串进结果状态 |
-| `hooks/useImageParseDownload.ts` | 修改 | `name` 字段上移到公共入参类型，去掉重复声明 |
+| `hooks/useImageParseDownload.ts` | 修改 | `name` 字段上移到公共入参类型，去掉重复声明；桌面壳落盘后弹 toast 显示保存路径 |
 | `components/experiences/ImageParseDownloadMenu.tsx` | 修改 | 下载菜单新增「Word（公式可编辑）」菜单项（Σ 图标） |
 | `components/experiences/ImageParseResultPane.tsx` | 修改 | 标准模式也开放复核面板（官方只给算法流水线模式开） |
 | `components/experiences/ImageParseExperience.tsx` | 修改 | 串起 regeneration 状态 |
@@ -105,6 +105,7 @@ git apply --whitespace=nowarn E:\OCR\upstream-local.patch
 | `scripts\normalize_eol.py` | 把被改文件行尾统一回 LF（只动行尾，其余字节不变） |
 | `scripts\make_patch.py` | 生成并**自证** `upstream-local.patch`（apply --check + 实际 apply 后逐文件比对 MD5） |
 | `scripts\health_check.ps1` | 全链路自检：静态（文件/依赖/许可/前端产物）+ 动态（四个服务/显存/Jev 是否在 CPU/官方三例分数口径/Word 导出/静态托管） |
+| `scripts\diagnose_webview_download.py` | 诊断 pywebview(WebView2) 里下载能不能落盘（试 blob 链接与 Content-Disposition 两种方式并打印结论） |
 | `upstream-local.patch` | 本机改造的标准 unified diff，可直接打到新的上游检出上 |
 
 ---

@@ -404,6 +404,55 @@ pywebview 6.2.1 + 系统自带的 **Edge WebView2 Runtime**（本机 156.0.4314.
 不额外下载 Chromium，独立 venv 在 `E:\OCR\.desktop`。
 窗口 1440×920，最小 1024×680。
 
+### 下载：桌面壳不能靠浏览器那套
+
+**现象**：桌面壳里点「下载」的四个选项（Markdown / JSON / Word / Word 公式可编辑），
+点了完全没反应，也没有新建下载任务；同一个页面在浏览器里却是好的。
+
+**根因**：桌面壳用的是 Edge WebView2，而 **pywebview 没有接 `CoreWebView2.DownloadStarting`**。
+WebView2 在没有下载处理器时会把下载**静默取消**。实测（`scripts\diagnose_webview_download.py`，
+可单独跑，会在 Downloads 目录里试两种方式并打印结论）：
+
+| 方式 | 结果 |
+|---|---|
+| blob URL + `<a download>` 点击 | 不落盘 |
+| 跳转到带 `Content-Disposition` 的 URL | 不落盘 |
+
+两条路都不通，所以不是前端哪个分支写错了，而是**桌面壳里根本没有浏览器下载机制可用**。
+
+**解法**：桌面壳改走 pywebview 官方的 **JS ↔ Python 桥**（`js_api`）。
+
+```
+浏览器：Blob → objectURL → <a download> → 系统下载弹窗          （保持原样，一行没改）
+桌面壳：Blob → base64 → window.pywebview.api.save_bytes() → Python 直接写盘
+```
+
+- 桌面壳打开工作台时带 `?shell=desktop`（`scripts\desktop_app.py`），
+  前端在模块加载时同步判定，**浏览器里不会为等桌面桥白等几秒**；
+- Python 侧 `DesktopApi.save_bytes()` 把文件写到 `%USERPROFILE%\Downloads`，
+  同名文件自动加序号不覆盖；目录可用环境变量 `OCR_DESKTOP_DOWNLOAD_DIR` 改；
+- 落盘后前端弹 toast 显示完整路径，用户知道文件去哪了；
+- 拿不到 JS 桥时直接报「文件生成失败」，而不是像以前那样**毫无反应**。
+
+涉及文件：`webdemo/frontend/.../imageParseExport.ts`、`hooks/useImageParseDownload.ts`、
+`i18n/messages/playground.ts`（新增 `imageParseDownloadSaved`）、`scripts/desktop_app.py`。
+
+#### 实测（真桌面窗口，WebView2）
+
+真开一个 pywebview 窗口加载工作台 → 用 DataTransfer 塞样例图 → 走完整解析 →
+逐个点下载菜单的四个选项，结果：
+
+| 点击项 | 落盘文件（Downloads） | 大小 | 内容 |
+|---|---|---|---|
+| `JSON .json` | `sample_doc.json` | 12976 B | 布局块 + Markdown 快照 |
+| `Markdown .md` | `sample_doc(1).md` | 1372 B | — |
+| `Word .docx` | `sample_doc(3).docx` | 10824 B | 官方前端导出：`oMath=0`，残留 LaTeX 源码 8 处 |
+| `Word（公式可编辑） .docx` | `sample_doc(4).docx` | 12045 B | Pandoc 导出：`oMath=2`、`oMathPara=2`、残留 0 |
+
+同名文件自动加序号不覆盖。浏览器路径回归验证：同一页面在 Chrome 里点
+「Word（公式可编辑）」仍走系统下载，`sample_doc.docx`（12045 B）正常落盘、后端
+`POST /api/export/word 200`。
+
 ### 为什么是 4 个服务而不是 5 个
 
 生产模式：前端 `pnpm build` 成静态文件后，**由 Web 后端自己托管**（同源 `/api`，不需要 proxy，也不需要 CORS），

@@ -1,0 +1,12 @@
+# Jev 打分后端配置：llama.cpp（预编译 llama-b12032，自带 Jev decision 模型支持）
+# 官方模板见 OpenBMB/MiniCPM-OCR scripts/minicpm-ocr-jev/sdk/backends/llamacpp.yaml
+# 唯一改动：base_url 指向本机 18498（避开 Ollama 1.0 服务的 18499）
+engine: llamacpp
+
+base_url: http://127.0.0.1:18498
+
+# 单次前向超时（秒）
+timeout_sec: 180
+
+# 同时在途的请求数。llama-server 多 slot 共享一个上下文窗口，这里只约束 socket 与内存
+max_in_flight: 4

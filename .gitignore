@@ -1,0 +1,28 @@
+# ── 本机部署层（E:\OCR）────────────────────────────────────────────────
+# 模型权重（几十 GB，不入库）
+models/
+
+# 上游源码副本与第三方二进制工具（体积大，各自带自己的许可）
+sources/
+
+# Python 虚拟环境
+.minicpm-ocr/
+.jev-score/
+.jev-render/
+.desktop/
+
+# 运行产物
+logs/
+runs/
+work/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

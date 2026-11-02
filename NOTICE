@@ -1,0 +1,24 @@
+MiniCPM-OCR 读判工作台（本机部署版）
+Copyright 2026 new_life1990
+
+本产品包含并改编自 OpenBMB 的 MiniCPM-OCR 项目：
+
+    MiniCPM-OCR
+    https://github.com/OpenBMB/MiniCPM-OCR
+    Copyright OpenBMB
+    Licensed under the Apache License, Version 2.0
+
+上游项目整体采用 Apache License 2.0 开源，涵盖代码、文档，以及 MiniCPM-OCR 1.0
+与 MiniCPM-OCR Jev 的模型权重。本机部署版在此基础上做了：
+
+  * Windows / 低显存（GTX 1050 Ti 4GB）适配
+  * MiniCPM-OCR Jev 逐块质检集成（低分块标红、复核面板、一键重识别）
+  * Pandoc 驱动的「Word（公式可编辑）」导出（公式转 Word 原生 OMML）
+  * 生产模式前端托管与 pywebview 桌面壳（start_desktop.bat）
+
+涉及的全部文件见同目录的 CHANGES.md。被修改的上游文件，均已在文件头部按
+Apache-2.0 第 4(b) 条声明改动；本文件同时满足第 4(d) 条对归属声明的要求。
+
+本部署版同样以 Apache License 2.0 发布，见同目录的 LICENSE。
+
+第三方组件保留各自原有许可，详见各组件目录内的 LICENSE 文件。

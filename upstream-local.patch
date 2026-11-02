@@ -1,0 +1,1255 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..b3595e1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,21 @@
++# ── 本机部署层加的仓库卫生规则 ─────────────────────────────────────────
++# 上游仓库本身没有 .gitignore，不补的话下面这些东西会被一并提交：
++#   node_modules 317MB、dist 26MB、__pycache__、运行时 job 数据。
++
++# 前端依赖与构建产物
++webdemo/frontend/node_modules/
++webdemo/frontend/dist/
++
++# Python 缓存
++__pycache__/
++*.pyc
++*.pyo
++
++# 运行时产物（job 目录、page worker 注册表等）
++webdemo/backend/data/
++
++# 编辑器 / 系统
++.vscode/
++.idea/
++Thumbs.db
++desktop.ini
+diff --git a/webdemo/backend/document_jobs.py b/webdemo/backend/document_jobs.py
+index 7d225bf..4287a90 100644
+--- a/webdemo/backend/document_jobs.py
++++ b/webdemo/backend/document_jobs.py
+@@ -1,3 +1,5 @@
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
+ """Hand an uploaded image or PDF to the local page worker.
+ 
+ The frontend polls page by page. A detector is held only while that page is
+@@ -110,6 +112,13 @@ def _run(job_id: str) -> None:
+         cfg = server.RUNNER.build_cfg(job_id, upright=bool(state["upright"]), mode="ocr", save_crops=False)
+         cfg["input"]["file_path"] = state["path"]
+         page_fleet.run_releasing_layout(server.RUNNER, cfg)
++        # 本机扩展：Jev 逐块质检，把一致性分数写回 results_json 的 crop_blocks，
++        # 前端据此做低分标注、复核与一键重识别。
++        try:
++            import jev_quality
++            jev_quality.score_job(Path(state["job_dir"]))
++        except Exception as exc:
++            print(f"[jev] 质检失败（不影响识别结果）: {exc}", flush=True)
+         pages = _collect_pages(state)
+         with _LOCK:
+             if state["status"] == "Running":
+diff --git a/webdemo/backend/jev_quality.py b/webdemo/backend/jev_quality.py
+new file mode 100644
+index 0000000..fe382c1
+--- /dev/null
++++ b/webdemo/backend/jev_quality.py
+@@ -0,0 +1,135 @@
++#!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++"""Jev 逐块质检（本机扩展）。
++
++官方前端按 block.score 做三件事：低分块标红、复核面板列���、"一键重识别"。
++云端版本这个分数来自 TTS 自评分（多轮重识别时选最优候选）；
++本地没有那套服务，这里用 MiniCPM-OCR Jev 的一致性分数补上：
++
++    prob_1 = 1.0  ->  该块 OCR 文本与原图一致
++    prob_1 = 0.0  ->  文本读起来通顺，但和原图对不上
++
++两者语义方向一致（越高越可信），所以可以直接填进同一个字段。
++
++渲染需要 playwright + KaTeX，装在独立 venv 里，因此这一步用子进程调用 worker。
++"""
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import tempfile
++from pathlib import Path
++from typing import Dict, List
++
++JEV_ENABLED = os.environ.get("OCRWEB_JEV", "0").strip().lower() not in ("", "0", "false", "no")
++JEV_PYTHON = os.environ.get("OCRWEB_JEV_PYTHON", r"E:\OCR\.jev-render\Scripts\python.exe")
++JEV_WORKER = os.environ.get("OCRWEB_JEV_WORKER", r"E:\OCR\scripts\jev_render_score.py")
++JEV_SCORE_URL = os.environ.get("OCRWEB_JEV_SCORE_URL", "http://127.0.0.1:18501")
++
++#: Jev 训练过的三类；其它版面类型没有对应类别，硬塞进 text 会让分数失真
++FORMULA_LABELS = {"display_formula", "inline_formula", "formula", "isolated_formula"}
++TABLE_LABELS = {"table", "table_caption", "table_footnote"}
++TEXT_LABELS = {
++    "text", "paragraph_title", "figure_title", "figure_caption", "chart_title",
++    "doc_title", "section_header", "header", "footer", "page_number",
++    "reference", "footnote", "list", "seal_text", "abandon",
++}
++
++
++def jev_category(label: str):
++    """把版面标签映射到 Jev 类别；无法映射返回 None（该块不参与打分）。"""
++    l = (label or "").strip().lower()
++    if l in FORMULA_LABELS:
++        return "formula"
++    if l in TABLE_LABELS:
++        return "table"
++    if l in TEXT_LABELS:
++        return "text"
++    return None
++
++
++def _worker(job: Dict, work_dir: Path) -> Dict:
++    job_file = work_dir / "jev_job.json"
++    job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
++    proc = subprocess.run(
++        [JEV_PYTHON, JEV_WORKER, "--job", str(job_file)],
++        capture_output=True, text=True, timeout=2400,
++    )
++    if proc.returncode != 0:
++        print(f"[jev] worker 退出码 {proc.returncode}: {proc.stderr[-500:]}", flush=True)
++        return {"results": [], "skipped": []}
++    try:
++        return json.loads(proc.stdout)
++    except Exception as exc:
++        print(f"[jev] worker 输出解析失败: {exc}", flush=True)
++        return {"results": [], "skipped": []}
++
++
++def score_page(job_dir: Path, stem: str, result: Dict) -> int:
++    """给一页的 crop_blocks 打分，把 prob_1 写进每个块的 jev_score。返回打分块数。"""
++    if not JEV_ENABLED:
++        return 0
++    crops_dir = job_dir / "runtime" / "intermediate" / "crops" / stem
++    if not crops_dir.is_dir():
++        print(f"[jev] {stem}: 没有裁块目录，跳过质检", flush=True)
++        return 0
++    blocks: List[Dict] = []
++    for blk in result.get("crop_blocks") or []:
++        label = blk.get("label", "")
++        content = blk.get("content") or ""
++        fname = blk.get("crop_filename") or ""
++        if jev_category(label) is None or not content.strip():
++            continue
++        if not (crops_dir / fname).is_file():
++            continue
++        blocks.append({
++            "order": blk.get("order"),
++            "label": label,
++            "crop_filename": fname,
++            "content": content,
++        })
++    if not blocks:
++        return 0
++    with tempfile.TemporaryDirectory(prefix="jev_") as tmp:
++        out = _worker({
++            "crops_dir": str(crops_dir),
++            "work_dir": tmp,
++            "score_url": JEV_SCORE_URL,
++            "blocks": blocks,
++        }, Path(tmp))
++    by_order = {item.get("order"): item.get("prob_1") for item in out.get("results", [])}
++    scored = 0
++    for blk in result.get("crop_blocks") or []:
++        prob = by_order.get(blk.get("order"))
++        if prob is None:
++            continue
++        blk["jev_score"] = float(prob)
++        scored += 1
++    print(f"[jev] {stem}: 已打分 {scored}/{len(blocks)} 块", flush=True)
++    return scored
++
++
++def score_job(job_dir: Path) -> int:
++    """给一个 job 目录下所有页打分，并把分数写回 results_json。"""
++    if not JEV_ENABLED:
++        return 0
++    layouts_dir = job_dir / "runtime" / "intermediate" / "layouts"
++    results_dir = job_dir / "results_json"
++    if not layouts_dir.is_dir():
++        return 0
++    total = 0
++    for layout_path in sorted(layouts_dir.glob("*.json")):
++        result_path = results_dir / f"{layout_path.stem}.json"
++        if not result_path.is_file():
++            continue
++        try:
++            result = json.loads(result_path.read_text(encoding="utf-8"))
++        except Exception:
++            continue
++        scored = score_page(job_dir, layout_path.stem, result)
++        if scored:
++            result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
++            total += scored
++    return total
+diff --git a/webdemo/backend/jev_regenerate.py b/webdemo/backend/jev_regenerate.py
+new file mode 100644
+index 0000000..cd2754a
+--- /dev/null
++++ b/webdemo/backend/jev_regenerate.py
+@@ -0,0 +1,150 @@
++#!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++"""单块重识别 + 重新质检（本机扩展）。
++
++官方前端的「一键重识别」是打云端 L2 接口（要 API Key + 页面凭证），本地没有那条路。
++这里给本机补一条等价通道：
++
++    POST /api/jev/regenerate
++      {"image": "<页面图 base64>", "bbox": [x1,y1,x2,y2], "label": "display_formula"}
++    -> {"markdown": "重新识别出的块内容", "prob_1": 0.87, "confidence": 0.87, "old": "..."}
++
++流程：裁块 -> 用 1.0 重新识别（走本机 Ollama）-> 渲染 -> Jev 重新打分。
++"""
++from __future__ import annotations
++
++import base64
++import binascii
++import io
++import json
++import os
++import tempfile
++from pathlib import Path
++from typing import Any, Dict
++
++from PIL import Image
++
++#: Jev 训练过的三类；其它版面类型没有对应类别，硬塞进 text 会让分数失真
++FORMULA_LABELS = {"display_formula", "inline_formula", "formula", "isolated_formula"}
++TABLE_LABELS = {"table", "table_caption", "table_footnote"}
++TEXT_LABELS = {
++    "text", "paragraph_title", "figure_title", "figure_caption", "chart_title",
++    "doc_title", "section_header", "header", "footer", "page_number",
++    "reference", "footnote", "list", "seal_text", "abandon",
++}
++
++JEV_PYTHON = os.environ.get("OCRWEB_JEV_PYTHON", r"E:\OCR\.jev-render\Scripts\python.exe")
++JEV_WORKER = os.environ.get("OCRWEB_JEV_WORKER", r"E:\OCR\scripts\jev_render_score.py")
++JEV_SCORE_URL = os.environ.get("OCRWEB_JEV_SCORE_URL", "http://127.0.0.1:18501")
++
++
++def jev_category(label: str):
++    l = (label or "").strip().lower()
++    if l in FORMULA_LABELS:
++        return "formula"
++    if l in TABLE_LABELS:
++        return "table"
++    if l in TEXT_LABELS:
++        return "text"
++    return None
++
++
++def _decode_image(data_url: str) -> bytes:
++    raw = data_url.split(",", 1)[1] if data_url.startswith("data:") else data_url
++    return base64.b64decode(raw, validate=False)
++
++
++def recognize_crop(crop: Image.Image, label: str) -> str:
++    """用本机 1.0 重新识别这一块。"""
++    import server  # 复用后端已有的识别客户端（指向本机 Ollama）
++    from minicpmvocr.prompts import DEFAULT_PROMPT_MAP, get_element_cfg
++
++    elem = get_element_cfg(DEFAULT_PROMPT_MAP, label)
++    if not elem:
++        elem = get_element_cfg(DEFAULT_PROMPT_MAP, "text")
++    service = getattr(server, "OCR_SVC", None)
++    if service is None:
++        service = server.OcrService()
++    result = service.recognize(
++        crop,
++        prompt=elem["prompt"],
++        max_new_tokens=int(elem.get("max_new_tokens", 4096)),
++    )
++    if isinstance(result, dict):
++        return str(result.get("text") or "")
++    return str(result or "")
++
++
++def score_crop(crop: Image.Image, text: str, category: str) -> float | None:
++    """渲染这块文本并让 Jev 打分。"""
++    import subprocess
++
++    with tempfile.TemporaryDirectory(prefix="jev_regen_") as tmp:
++        work = Path(tmp)
++        crop_path = work / "block.png"
++        crop.save(crop_path)
++        job = {
++            "crops_dir": str(work),
++            "work_dir": str(work / "render"),
++            "score_url": JEV_SCORE_URL,
++            "blocks": [{
++                "order": 0,
++                "label": "text" if category == "formula" else category,
++                "crop_filename": "block.png",
++                "content": text,
++            }],
++        }
++        job_file = work / "job.json"
++        job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
++        proc = subprocess.run(
++            [JEV_PYTHON, JEV_WORKER, "--job", str(job_file)],
++            capture_output=True, text=True, timeout=1200,
++        )
++        if proc.returncode != 0:
++            print(f"[jev] 重新打分失败: {proc.stderr[-400:]}", flush=True)
++            return None
++        try:
++            out = json.loads(proc.stdout)
++        except Exception:
++            return None
++        for item in out.get("results", []):
++            if item.get("prob_1") is not None:
++                return float(item["prob_1"])
++    return None
++
++
++def regenerate_block(payload: Dict[str, Any]) -> Dict[str, Any]:
++    image_b64 = payload.get("image")
++    bbox = payload.get("bbox")
++    label = str(payload.get("label") or "text")
++    if not image_b64 or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
++        raise ValueError("需要 image 与 bbox")
++    raw = _decode_image(str(image_b64))
++    with Image.open(io.BytesIO(raw)) as page:
++        page = page.convert("RGB")
++        values = [float(v) for v in bbox]
++        # 归一化坐标(x,y,w,h ∈ [0,1]) 按页面实际像素换算；像素坐标直接用。
++        if max(values) <= 1.5:
++            x = values[0] * page.width
++            y = values[1] * page.height
++            w = values[2] * page.width
++            h = values[3] * page.height
++        else:
++            x, y, w, h = values
++        crop = page.crop((
++            max(0, int(round(x))),
++            max(0, int(round(y))),
++            min(page.width, int(round(x + w))),
++            min(page.height, int(round(y + h))),
++        ))
++    text = recognize_crop(crop, label)
++    category = jev_category(label)
++    prob = score_crop(crop, text, category or "text") if category else None
++    return {
++        "markdown": text,
++        "text": text,
++        "prob_1": prob,
++        "confidence": prob,
++        "category": category,
++    }
+diff --git a/webdemo/backend/model_manager.py b/webdemo/backend/model_manager.py
+index 185e6af..3fb95c0 100644
+--- a/webdemo/backend/model_manager.py
++++ b/webdemo/backend/model_manager.py
+@@ -1,4 +1,6 @@
+ #!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
+ """Model resource manager.
+ 
+ It does two things:
+@@ -53,11 +55,13 @@ UPRIGHT_WORKERS = int(os.environ.get("OCR_UPRIGHT_WORKERS", "8"))
+ # Fixed pipeline overrides: a person is waiting, so layout and recognition overlap.
+ # Full-page images and crops are not written to disk by default. Encoding a large PNG dominates the layout stage.
+ # Only a single-block rerun reads crops from disk, and build_cfg(save_crops=True) turns that on by itself.
++# 本机 Jev 质检需要模型实际看到的裁块与页面图，OCRWEB_SAVE_ARTIFACTS=1 时把两者落盘。
++_SAVE_ARTIFACTS = os.environ.get("OCRWEB_SAVE_ARTIFACTS", "0").strip().lower() not in ("", "0", "false", "no")
+ WEBUI_OVERRIDES: Dict = {
+     "pipeline": {
+         "overlap_layout": True,
+-        "save_crops": False,
+-        "save_pages": False,
++        "save_crops": _SAVE_ARTIFACTS,
++        "save_pages": _SAVE_ARTIFACTS,
+     },
+     "logging": {"progress_log_every": 5},
+ }
+@@ -200,7 +204,8 @@ class Runner:
+                 "use_chart_recognition": True,
+                 "use_seal_recognition": True,
+             },
+-            pipeline={"save_crops": bool(save_crops)},
++            pipeline={"save_crops": bool(save_crops) or _SAVE_ARTIFACTS,
++                      "save_pages": _SAVE_ARTIFACTS},
+             # A recipe holds nested dicts, so concurrent requests cannot share one copy.
+             tts=copy.deepcopy(TTS_RECIPES[mode]),
+         )
+diff --git a/webdemo/backend/page_fleet.py b/webdemo/backend/page_fleet.py
+index 06dff23..5d550e7 100644
+--- a/webdemo/backend/page_fleet.py
++++ b/webdemo/backend/page_fleet.py
+@@ -1,4 +1,6 @@
+ #!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
+ """Split a parse across this machine and remote 8-GPU machines, one page at a time.
+ 
+ This machine splits the PDF into pages. Each page is either laid out and
+@@ -11,6 +13,7 @@ import json
+ import os
+ import shutil
+ import socket
++import subprocess
+ import threading
+ import time
+ import urllib.request
+@@ -20,6 +23,15 @@ from typing import Dict, List, Optional
+ 
+ from model_manager import JOBS_DIR, new_job_id
+ 
++# ── Jev 逐块质检（本机扩展）────────────────────────────────────────────────
++# 官方前端已经按 block.confidence 做低分标注、复核与一键重识别；这里把 Jev 的
++# 一致性分数填进这个字段，官方那套质量 UI 就直接生效。
++# 渲染要 playwright + KaTeX，装在独立 venv 里，所以这一步用子进程调用。
++JEV_ENABLED = os.environ.get("OCRWEB_JEV", "0").strip().lower() not in ("", "0", "false", "no")
++JEV_PYTHON = os.environ.get("OCRWEB_JEV_PYTHON", r"E:\OCR\.jev-render\Scripts\python.exe")
++JEV_WORKER = os.environ.get("OCRWEB_JEV_WORKER", r"E:\OCR\scripts\jev_render_score.py")
++JEV_SCORE_URL = os.environ.get("OCRWEB_JEV_SCORE_URL", "http://127.0.0.1:18501")
++
+ PAGE_REGISTRY = Path(os.environ.get(
+     "OCR_PAGE_REGISTRY",
+     str(Path(__file__).resolve().parent / "data" / "page-workers"),
+@@ -155,6 +167,8 @@ def launch_local_page(runner, png_bytes: bytes, upright=None) -> PageHandle:
+             handle.markdown = result.get("markdown") or ""
+             slices = _public_slices(result, layout)
+             handle.blocks = slices["blocks"]
++            # Jev 质检：填 block["confidence"]，官方前端的低分标注/复核面板据此工作
++            _jev_confidence(job_dir, handle.blocks)
+             handle.image_width = slices["image_width"]
+             handle.image_height = slices["image_height"]
+             handle.rotation = slices["rotation"]
+@@ -464,6 +478,26 @@ def _payload_from_body(body: Dict) -> Dict:
+     }
+ 
+ 
++def _jev_confidence(job_dir: Path, blocks: List[Dict]) -> None:
++    """Jev 逐块打分（单页票路径）。分数写进 result 的 crop_blocks，_public_slices 再带出来。"""
++    if not JEV_ENABLED:
++        return
++    try:
++        import jev_quality
++    except Exception as exc:
++        print(f"[jev] 模块不可用: {exc}", flush=True)
++        return
++    result_path = job_dir / "results_json" / "page.json"
++    if not result_path.is_file():
++        return
++    try:
++        result = json.loads(result_path.read_text(encoding="utf-8"))
++    except Exception:
++        return
++    if jev_quality.score_page(job_dir, "page", result):
++        result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
++
++
+ def _public_slices(result: Dict, layout: Dict) -> Dict:
+     """Turn a page result into the public crops. A figure block has no recognized text; its coordinates are that figure's box on the page."""
+     layout = layout or {}
+@@ -482,6 +516,10 @@ def _public_slices(result: Dict, layout: Dict) -> Dict:
+             "regions": item.get("regions") or [bbox],
+             "content": found.get("content") or "",
+             "status": found.get("status") or "",
++            # 本机 Jev 质检要用模型实际看到的那块裁图，这里把裁块文件名带出来。
++            "crop_filename": item.get("crop_filename") or found.get("crop_filename") or "",
++            # 本机 Jev 一致性分数（官方前端按 score 做低分标注与复核）
++            **({"score": float(found["jev_score"])} if found.get("jev_score") is not None else {}),
+         })
+     if not blocks:
+         for found in result.get("crop_blocks") or []:
+@@ -493,6 +531,7 @@ def _public_slices(result: Dict, layout: Dict) -> Dict:
+                 "regions": found.get("regions") or [bbox],
+                 "content": found.get("content") or "",
+                 "status": found.get("status") or "",
++                "crop_filename": found.get("crop_filename") or "",
+             })
+     return {
+         "image_width": result.get("image_width") or layout.get("image_width") or 0,
+diff --git a/webdemo/backend/server.py b/webdemo/backend/server.py
+index d4f14a0..6039291 100644
+--- a/webdemo/backend/server.py
++++ b/webdemo/backend/server.py
+@@ -1,4 +1,6 @@
+ #!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
+ """MiniCPM-V-OCR parse backend. The only public entry.
+ 
+ Deployment and the API are in docs/webdemo_deploy_zh.md. Internal service, no auth.
+@@ -159,6 +161,12 @@ def _block_to_api(lb: Dict, rb: Dict) -> Dict:
+     regions = lb.get("regions") or [lb.get("bbox", [0, 0, 0, 0])]
+     tts = rb.get("tts") or {}
+     score = _best_score(rb)
++    if score is None:
++        # 本机扩展：没有 TTS 自评分时，用 Jev 的一致性分数顶上。
++        # 两者语义方向一致（越高越可信），前端那套低分标注/复核/重识别据此工作。
++        jev = rb.get("jev_score")
++        if jev is not None:
++            score = float(jev)
+     block: Dict = {
+         "order": lb.get("order", 0),
+         "label": lb.get("label", ""),
+@@ -476,6 +484,52 @@ async def kie(request: Request):
+     return await run_in_threadpool(_handle_kie, body)
+ 
+ 
++@app.post("/api/jev/regenerate")
++async def jev_regenerate(request: Request):
++    """单块重识别 + 重新质检（本机扩展）。
++
++    官方前端的「一键重识别」打的是云端 L2 接口；本机没有那条路，
++    这里用本机 1.0 重识别该块，再用 Jev 重新打分，前端拿到的是同一口径的分数。
++    """
++    try:
++        body = await request.json()
++    except Exception:
++        return _err(400, "请求体不是 JSON")
++    try:
++        import jev_regenerate as jev_regen
++        return await run_in_threadpool(jev_regen.regenerate_block, body)
++    except Exception as exc:
++        return _err(500, f"重识别失败：{exc}")
++
++
++@app.post("/api/export/word")
++async def export_word(request: Request):
++    """用 Pandoc 导出 Word，公式是 Word 原生公式（OMML，可继续编辑）。
++
++    官方前端自带的 Word 导出是纯前端实现，公式被故意保留成 LaTeX 源码纯文本；
++    这条路由改走服务端 Pandoc，$$..$$ 与 $..$ 会被转成 Word 原生公式。
++    """
++    try:
++        body = await request.json()
++    except Exception:
++        return _err(400, "请求体不是 JSON")
++    markdown = body.get("markdown") or ""
++    name = str(body.get("name") or "document")
++    if not markdown.strip():
++        return _err(400, "没有可导出的内容")
++    try:
++        import word_export
++        data = await run_in_threadpool(word_export.markdown_to_docx_bytes, markdown)
++    except Exception as exc:
++        return _err(500, f"导出失败：{exc}")
++    safe = "".join(ch for ch in name if ch not in '\\/:*?"<>|') or "document"
++    return Response(
++        content=data,
++        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
++        headers={"Content-Disposition": f'attachment; filename="{safe}.docx"'},
++    )
++
++
+ @app.post("/api/image-parse")
+ async def image_parse(request: Request):
+     body = await request.json()
+@@ -803,6 +857,50 @@ from document_jobs import router as document_job_router  # noqa: E402
+ app.include_router(document_job_router)
+ 
+ 
++# ===================================================================
++# Static frontend (production mode)
++# ===================================================================
++# 本机扩展：构建后的前端（frontend/dist）由本后端直接托管，
++# 于是桌面壳和浏览器都访问同一个端口（8966），不需要再跑 Vite dev server。
++# 前端用的是相对路径 API（/api/...），同源部署天然可用，也不需要 CORS。
++FRONTEND_DIST = Path(
++    os.environ.get("OCRWEB_FRONTEND_DIST", str(BASE.parent / "frontend" / "dist"))
++).resolve()
++
++if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file():
++    from fastapi.staticfiles import StaticFiles  # noqa: E402
++    from starlette.responses import FileResponse  # noqa: E402
++
++    for _mount, _folder in (
++        ("/assets", "assets"),
++        ("/voices", "voices"),
++        ("/pdfjs", "pdfjs"),
++    ):
++        _dir = FRONTEND_DIST / _folder
++        if _dir.is_dir():
++            app.mount(_mount, StaticFiles(directory=_dir), name=f"frontend-{_folder}")
++
++    @app.get("/{full_path:path}", include_in_schema=False)
++    async def _spa(full_path: str):
++        """SPA fallback：未知路径回 index.html，让 /playground/* 直接刷新也能进。
++
++        API 与模型路由必须仍然 404，否则前端会拿到一段 HTML 当成接口响应。
++        """
++        if full_path.startswith(("api/", "v1/")) or full_path in {
++            "health",
++            "ready",
++            "metrics",
++        }:
++            return JSONResponse({"error": "not found"}, status_code=404)
++        if full_path:
++            candidate = (FRONTEND_DIST / full_path).resolve()
++            if candidate.is_file() and candidate.is_relative_to(FRONTEND_DIST):
++                return FileResponse(candidate)
++        return FileResponse(FRONTEND_DIST / "index.html")
++
++    print(f"[webdemo] static frontend: {FRONTEND_DIST}", flush=True)
++
++
+ @app.on_event("startup")
+ async def _startup():
+     global RUNNER, OCR_SVC
+diff --git a/webdemo/backend/word_export.py b/webdemo/backend/word_export.py
+new file mode 100644
+index 0000000..ac0c8b5
+--- /dev/null
++++ b/webdemo/backend/word_export.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++# 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++# Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++"""用 Pandoc 把解析结果导出成 Word，公式是 Word 原生公式（OMML，可继续编辑）。
++
++为什么不用官方前端那个导出：它的 docx 导出是纯前端做的，公式分支明确"保留 LaTeX 源码为纯文本"，
++所以 Word 里看到的是 \\frac{...} 而不是排好版的公式。这里走另一条路：
++
++    Markdown -> HTML 表格转 pipe 表格 -> pandoc -> docx
++
++pandoc 自带 LaTeX 数学到 OMML 的转换器，**不需要安装 LaTeX 发行版**。
++"""
++from __future__ import annotations
++
++import html
++import os
++import re
++import shutil
++import subprocess
++import tempfile
++from html.parser import HTMLParser
++from pathlib import Path
++from typing import List
++
++#: pandoc 可执行文件；优先用 PATH 上的，其次用本机安装位置与本机的便携版
++PANDOC_CANDIDATES = (
++    os.environ.get("OCR_PANDOC", ""),
++    r"E:\OCR\sources\pandoc\pandoc-3.13\pandoc.exe",
++    r"C:\Program Files\Pandoc\pandoc.exe",
++    r"C:\Users\{user}\AppData\Local\Pandoc\pandoc.exe",
++)
++
++
++def find_pandoc() -> str | None:
++    for cand in PANDOC_CANDIDATES:
++        if cand and Path(cand).is_file():
++            return cand
++    found = shutil.which("pandoc")
++    return found
++
++
++class _TableParser(HTMLParser):
++    """把 HTML 表格拆成行 -> 单元格纯文本。"""
++
++    def __init__(self) -> None:
++        super().__init__(convert_charrefs=True)
++        self.rows: List[List[str]] = []
++        self._row: List[str] | None = None
++        self._cell: List[str] | None = None
++        self._in_table = False
++
++    def handle_starttag(self, tag, attrs):
++        if tag == "table":
++            self._in_table = True
++        elif tag == "tr" and self._in_table:
++            self._row = []
++        elif tag in ("td", "th") and self._row is not None:
++            self._cell = []
++
++    def handle_endtag(self, tag):
++        if tag == "table" and self._in_table:
++            self._in_table = False
++        elif tag == "tr" and self._row is not None:
++            self.rows.append(self._row)
++            self._row = None
++        elif tag in ("td", "th") and self._cell is not None and self._row is not None:
++            text = " ".join("".join(self._cell).split())
++            self._row.append(text)
++            self._cell = None
++
++    def handle_data(self, data):
++        if self._cell is not None:
++            self._cell.append(data)
++
++
++def _cell(text: str) -> str:
++    return text.replace("|", r"\|").strip()
++
++
++def html_table_to_pipe(table_html: str) -> str:
++    """HTML 表格 -> pandoc 能读的 pipe 表格。"""
++    parser = _TableParser()
++    parser.feed(table_html)
++    rows = [r for r in parser.rows if any(c for c in r)]
++    if not rows:
++        return table_html
++    width = max(len(r) for r in rows)
++    rows = [r + [""] * (width - len(r)) for r in rows]
++    lines = ["| " + " | ".join(_cell(c) for c in rows[0]) + " |"]
++    lines.append("| " + " | ".join("---" for _ in range(width)) + " |")
++    for row in rows[1:]:
++        lines.append("| " + " | ".join(_cell(c) for c in row) + " |")
++    return "\n".join(lines)
++
++
++def convert_html_tables(markdown: str) -> str:
++    """把正文里的 HTML 表格换成 pipe 表格（pandoc 的 markdown reader 不认 HTML 表格）。"""
++    pattern = re.compile(r"<table\b[^>]*>.*?</table>", re.S | re.I)
++
++    def repl(match: "re.Match[str]") -> str:
++        return html_table_to_pipe(match.group(0))
++
++    return pattern.sub(repl, markdown)
++
++
++def strip_images(markdown: str) -> str:
++    """去掉图片引用。远程图片会让 pandoc 抓取失败，整份导出一起挂掉。"""
++    markdown = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)
++    markdown = re.sub(r"<img\b[^>]*>", "", markdown, flags=re.I)
++    return markdown
++
++
++#: 公式：$$..$$ 与 $..$；表格：pipe table
++_READER = "markdown+tex_math_dollars+pipe_tables+raw_html+footnotes+yaml_metadata_block"
++
++
++def markdown_to_docx_bytes(markdown: str) -> bytes:
++    """Markdown -> docx 字节流。优先保留公式；失败时退化为无公式、无图片的版本。"""
++    pandoc = find_pandoc()
++    if not pandoc:
++        raise RuntimeError("找不到 pandoc，请先安装（winget install JohnMacFarlane.Pandoc）")
++
++    prepared = convert_html_tables(markdown)
++    with tempfile.TemporaryDirectory(prefix="word_export_") as tmp:
++        work = Path(tmp)
++        attempts = [
++            ("full", prepared),
++            ("no_images", strip_images(prepared)),
++            ("plain", strip_images(convert_html_tables(markdown))),
++        ]
++        errors = []
++        for name, text in attempts:
++            src = work / f"{name}.md"
++            out = work / f"{name}.docx"
++            src.write_text(text, encoding="utf-8")
++            proc = subprocess.run(
++                [pandoc, "-f", _READER, "-t", "docx", "--resource-path", str(work), "-o", str(out), str(src)],
++                capture_output=True, text=True, timeout=300,
++            )
++            if proc.returncode == 0 and out.is_file() and out.stat().st_size > 0:
++                return out.read_bytes()
++            errors.append(f"{name}: {proc.stderr.strip()[-300:]}")
++        raise RuntimeError("pandoc 导出失败：" + " | ".join(errors))
++
++
++def html_table_stats(markdown: str) -> dict:
++    """统计正文里的表格与公式，供自检使用。"""
++    return {
++        "html_tables": len(re.findall(r"<table\b", markdown, re.I)),
++        "display_math": len(re.findall(r"\$\$", markdown)),
++    }
+diff --git a/webdemo/frontend/src/api/map/request.ts b/webdemo/frontend/src/api/map/request.ts
+index 995c2b2..1438109 100644
+--- a/webdemo/frontend/src/api/map/request.ts
++++ b/webdemo/frontend/src/api/map/request.ts
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { getDemoUpload } from './demoStore';
+ 
+ /**
+@@ -11,6 +15,12 @@ const DEMO_USER_ID = 'demo-user';
+ const DEMO_PROJECT_ID = 'demo-project';
+ const DEMO_TOKEN = `demo.${btoa(JSON.stringify({ sub: DEMO_USER_ID }))}.demo`;
+ 
++/**
++ * 本机部署标记：识别与质检都跑在本机后端（8966），没有云端 L2，
++ * 因此单块重识别走本机的 /api/jev/regenerate，而不是云端的 tts_block 模式。
++ */
++export const IMAGE_PARSE_LOCAL_BACKEND = true;
++
+ if (!localStorage.getItem(TOKEN_KEY)) {
+   localStorage.setItem(TOKEN_KEY, DEMO_TOKEN);
+ }
+diff --git a/webdemo/frontend/src/i18n/messages/playground.ts b/webdemo/frontend/src/i18n/messages/playground.ts
+index 97108ea..75559a8 100644
+--- a/webdemo/frontend/src/i18n/messages/playground.ts
++++ b/webdemo/frontend/src/i18n/messages/playground.ts
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import type { TranslationShape } from '../types';
+ 
+ const zhCN = {
+@@ -312,7 +316,7 @@ const zhCN = {
+     '在右侧结果中双击任意内容块即可直接修改识别文本。失焦后会自动保存，复制和下载会使用修改后的内容。',
+   imageParseTourExportTitle: '带走你的成果',
+   imageParseTourExportBody:
+-    '识别完成后，可从结果栏右上角导出 Markdown、JSON 或 Word。表格也可以直接复制到飞书、Word 或 Excel。',
++    '识别完成后，可从结果栏右上角导出 Markdown、JSON 或 Word。Word 有两种：普通 Word 保留公式的 LaTeX 源码，「Word（公式可编辑）」导出 Word 原生公式。表格也可以直接复制到飞书、Word 或 Excel。',
+   imageParseKieTourExampleTitle: '选择票据示例或上传文件',
+   imageParseKieTourExampleBody:
+     '可以先选择平台票据示例，系统会自动预填常用字段；也可以直接上传图片或 PDF。',
+@@ -396,7 +400,8 @@ const zhCN = {
+     '这不代表内容已经确认正确。可查看有分数的区块，或继续对照原图自行复核。',
+   imageParseSource: 'Markdown 源码',
+   imageParseDownload: '下载',
+-  imageParseDownloadHint: '选择 Markdown、JSON 或 Word 格式导出当前识别结果',
++  imageParseDownloadHint:
++    '选择 Markdown、JSON 或 Word 格式导出当前识别结果；「Word（公式可编辑）」导出的是 Word 原生公式，可继续编辑',
+   imageParseDownloading: '正在生成文件',
+   imageParseDownloadFailed: '文件生成失败，请重试。',
+   imageParseEmpty: '暂无解析结果',
+@@ -1157,7 +1162,7 @@ const enUS = {
+     'Double-click any content block in the result pane to edit the recognized text. Changes are saved when you leave the block and are included in copies and downloads.',
+   imageParseTourExportTitle: 'Take your results with you',
+   imageParseTourExportBody:
+-    'When recognition completes, export Markdown, JSON, or Word from the result pane. You can also copy tables directly into Feishu, Word, or Excel.',
++    'When recognition completes, export Markdown, JSON, or Word from the result pane. Word comes in two flavours: the plain one keeps formulas as LaTeX source, while "Word（公式可编辑）" exports native Word equations. You can also copy tables directly into Feishu, Word, or Excel.',
+   imageParseKieTourExampleTitle: 'Choose a receipt sample or upload a file',
+   imageParseKieTourExampleBody:
+     'Start with a platform receipt sample to prefill common fields, or upload an image or PDF directly.',
+@@ -1287,7 +1292,8 @@ const enUS = {
+     'This does not confirm correctness. Browse scored blocks or compare with the original image.',
+   imageParseSource: 'Markdown source',
+   imageParseDownload: 'Download',
+-  imageParseDownloadHint: 'Export the current result as Markdown, JSON, or Word',
++  imageParseDownloadHint:
++    'Export the current result as Markdown, JSON, or Word. "Word（公式可编辑）" produces native Word equations you can keep editing.',
+   imageParseDownloading: 'Generating file',
+   imageParseDownloadFailed: 'Could not generate the file. Please try again.',
+   imageParseEmpty: 'No parsed result yet',
+diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx
+index c6d91c2..6d85a5e 100644
+--- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx
++++ b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDocumentWorkspace.tsx
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import type { CSSProperties, RefObject } from 'react';
+ 
+ import { cn } from '@map/ui';
+@@ -97,6 +101,7 @@ export function ImageParseDocumentWorkspace({
+     previewLinkedRanges,
+     previewCrops,
+     quality,
++    regeneration,
+     download,
+   } = resultState;
+   return (
+@@ -166,6 +171,7 @@ export function ImageParseDocumentWorkspace({
+           onReplace={onPick}
+           resultProps={{
+             quality,
++            regeneration,
+             ranges,
+             draft,
+             previewMarkdown: preview.markdown,
+diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDownloadMenu.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDownloadMenu.tsx
+index d77e16b..37eada0 100644
+--- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDownloadMenu.tsx
++++ b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseDownloadMenu.tsx
+@@ -1,4 +1,8 @@
+-import { Download, FileJson, FileText, FileType2, Loader2 } from 'lucide-react';
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
++import { Download, FileJson, FileText, FileType2, Loader2, Sigma } from 'lucide-react';
+ import { useTranslation } from 'react-i18next';
+ 
+ import {
+@@ -28,6 +32,8 @@ const FORMATS = [
+   { format: 'markdown', label: 'Markdown', extension: '.md', icon: FileText },
+   { format: 'json', label: 'JSON', extension: '.json', icon: FileJson },
+   { format: 'word', label: 'Word', extension: '.docx', icon: FileType2 },
++  // 本机扩展：走服务端 Pandoc，公式是 Word 原生公式（OMML，可继续编辑）。
++  { format: 'word-math', label: 'Word（公式可编辑）', extension: '.docx', icon: Sigma },
+ ] as const;
+ 
+ /**
+diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseExperience.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseExperience.tsx
+index 869f306..182a838 100644
+--- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseExperience.tsx
++++ b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseExperience.tsx
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ /** Image-parse workspace: after upload, run full-text recognition automatically. Field extraction is configured first. The original and the result sit side by side. */
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -113,6 +117,7 @@ export function ImageParseExperience({
+     previewLinkedRanges,
+     previewCrops,
+     quality,
++    regeneration,
+     download,
+   } = useImageParseResultState(parse, examples.pageKey);
+   const split = useSplitPane();
+@@ -342,6 +347,7 @@ export function ImageParseExperience({
+               previewLinkedRanges,
+               previewCrops,
+               quality,
++              regeneration,
+               download,
+             }}
+             examples={examples}
+diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseResultPane.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseResultPane.tsx
+index add7699..e443623 100644
+--- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseResultPane.tsx
++++ b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseResultPane.tsx
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ /** Image-parse result column: keep the body mounted when switching views, so it is not parsed again. */
+ 
+ import { useMemo, useRef, useState } from 'react';
+@@ -161,7 +165,10 @@ export function ImageParseResultPane({
+     [shownLayout, selectedBlockId],
+   );
+   const algorithmMode = parse.mode === 'standard' || isImageParsePipelineMode(parse.mode);
+-  const showReview = reviewEnabled && !algorithmMode;
++  // 本机改造：官方只在算法流水线模式下开放待复核面板（标准模式被排除）。
++  // 本机的标准模式由后端用 MiniCPM-OCR Jev 的一致性分数填 block.confidence，
++  // 复核面板、低分标注与一键重识别正是靠这个分数工作，所以标准模式也一并开放。
++  const showReview = reviewEnabled;
+   // The page-count note says the original is already open; unfinished pages keep a placeholder so users do not think the result column is unresponsive.
+   const continuousPdf = Boolean(parse.pdf?.pages);
+   // Seal recognition allows an empty body; as long as real blocks came back, show the result rather than the empty state.
+diff --git a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseUploadSurface.tsx b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseUploadSurface.tsx
+index 6ecdd0d..001cbae 100644
+--- a/webdemo/frontend/src/pages/playground/components/experiences/ImageParseUploadSurface.tsx
++++ b/webdemo/frontend/src/pages/playground/components/experiences/ImageParseUploadSurface.tsx
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { useRef, type ChangeEvent, type DragEventHandler } from 'react';
+ import { Upload } from 'lucide-react';
+ import { useTranslation } from 'react-i18next';
+@@ -84,7 +88,9 @@ export function ImageParseUploadSurface({
+             multiple={multiple}
+             disabled={disabled}
+             aria-label={t(actionKey)}
+-            className="hidden"
++            // 本机改造：display:none 的 input 无法被自动化定位（拿不到无障碍 ref），
++            // 改成 sr-only —— 视觉上仍然隐藏，但留在无障碍树里，可被键盘与自动化命中。
++            className="sr-only"
+             onChange={takeFiles}
+             onDragOver={onDragOver as DragEventHandler<HTMLInputElement> | undefined}
+             onDragLeave={onDragLeave as DragEventHandler<HTMLInputElement> | undefined}
+diff --git a/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts b/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
+index 62b409d..60486ca 100644
+--- a/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
++++ b/webdemo/frontend/src/pages/playground/hooks/useImageParseDownload.ts
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ 
+@@ -12,7 +16,6 @@ import {
+ } from '../utils/imageParseExport';
+ 
+ interface ImageParseDownloadInput extends ImageParseExportInput {
+-  name?: string;
+   page?: number;
+   disabled: boolean;
+ }
+diff --git a/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts b/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts
+index 8c6f841..577a9d2 100644
+--- a/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts
++++ b/webdemo/frontend/src/pages/playground/hooks/useImageParseRegeneration.ts
+@@ -1,5 +1,10 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+ import { imageParseSourceUnavailable, type ImageParseSource } from '@/api/map/imageParseSource';
++import { IMAGE_PARSE_LOCAL_BACKEND } from '@/api/map/request';
+ 
+ import type { ImageParseDraft } from './useImageParseDraft';
+ import type { ImageParseLayoutBlock } from '../utils/imageParseSample';
+@@ -47,8 +52,12 @@ export function useImageParseRegeneration(input: RegenerationInput) {
+   }>({ key: resultKey, histories: {}, pending: new Set() });
+   const results = useMemo(() => state.histories[resultKey] ?? {}, [resultKey, state.histories]);
+   const pending = state.key === resultKey ? state.pending : new Set<string>();
+-  const unavailableReason = imageParseSourceUnavailable(input.source) ??
+-    (input.secret ? undefined : 'imageParseAuthFailed');
++  // 本机改造：本地后端就是唯一服务端，不需要云端的页面凭证与 API Key，
++  // 单块重识别走 /api/jev/regenerate，所以这里不按云端口径判不可用。
++  const unavailableReason = IMAGE_PARSE_LOCAL_BACKEND
++    ? undefined
++    : (imageParseSourceUnavailable(input.source) ??
++       (input.secret ? undefined : 'imageParseAuthFailed'));
+   const available = unavailableReason === undefined;
+ 
+   const stop = useCallback(() => {
+diff --git a/webdemo/frontend/src/pages/playground/hooks/useImageParseResultState.ts b/webdemo/frontend/src/pages/playground/hooks/useImageParseResultState.ts
+index f5ffdc0..e916c1b 100644
+--- a/webdemo/frontend/src/pages/playground/hooks/useImageParseResultState.ts
++++ b/webdemo/frontend/src/pages/playground/hooks/useImageParseResultState.ts
+@@ -1,8 +1,13 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { useMemo } from 'react';
+ 
+ import type { useImageParse } from './useImageParse';
+ import { useImageParseDraft } from './useImageParseDraft';
+ import { useImageParseDownload } from './useImageParseDownload';
++import { useImageParseRegeneration } from './useImageParseRegeneration';
+ import { imageParseBlockRanges } from '../utils/imageParseBlocks';
+ import { imageParseQuality } from '../utils/imageParseQuality';
+ import {
+@@ -56,6 +61,19 @@ export function useImageParseResultState(
+     [parse.crops, parse.layout, parse.recognizeChart, parse.recognizeSeal],
+   );
+   const quality = useMemo(() => imageParseQuality(parse.layout), [parse.layout]);
++  // 本机改造：把单块重识别挂上。低分块（置信度来自 Jev 一致性分数）可以在复核面板里
++  // 重新识别，重新识别后由本机后端再用 Jev 打一次分，分数口径与页面上的一致。
++  const regeneration = useImageParseRegeneration({
++    resultKey: parse.resultKey,
++    model: 'minicpm-ocr',
++    secret: 'local',
++    blocks: parse.layout,
++    draft,
++    documentDataUrl: parse.attachment?.dataUrl ?? '',
++    mime: parse.attachment?.mime ?? '',
++    pageIndex: parse.pdf?.page ?? 1,
++    loading: parse.loading,
++  });
+   const download = useImageParseDownload({
+     markdown: draft.value,
+     blocks: parse.layout,
+@@ -75,6 +93,7 @@ export function useImageParseResultState(
+     previewLinkedRanges,
+     previewCrops,
+     quality,
++    regeneration,
+     download,
+   };
+ }
+diff --git a/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts b/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
+index eb4b76c..c42a9eb 100644
+--- a/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
++++ b/webdemo/frontend/src/pages/playground/utils/imageParseExport.ts
+@@ -1,15 +1,21 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import type { ImageParseTextRange } from './imageParseBlocks';
+ import { imageParseBlockId } from './imageParseBlocks';
+ import type { ImageParseLayoutBlock } from './imageParseSample';
+ import type { ImageParseRotationInfo } from './imageParseSample';
+ 
+ /** Download formats supported for the current OCR result. */
+-export type ImageParseDownloadFormat = 'markdown' | 'json' | 'word';
++export type ImageParseDownloadFormat = 'markdown' | 'json' | 'word' | 'word-math';
+ 
+ /** A download snapshot does not accept a source token, API Key, or the raw request, so credentials do not enter the exported file. */
+ export interface ImageParseExportInput {
+   markdown: string;
+   blocks: readonly ImageParseLayoutBlock[];
++  /** Original document name; used for the download file name and the Word export header. */
++  name?: string;
+   rotation?: ImageParseRotationInfo;
+   ranges?: ReadonlyMap<string, ImageParseTextRange>;
+   edited?: boolean;
+@@ -19,6 +25,7 @@ const EXTENSIONS: Record<ImageParseDownloadFormat, string> = {
+   markdown: 'md',
+   json: 'json',
+   word: 'docx',
++  'word-math': 'docx',
+ };
+ 
+ /**
+@@ -51,6 +58,20 @@ export async function createImageParseExport(
+     const { createImageParseWordBlob } = await import('./imageParseWord');
+     return createImageParseWordBlob(input.markdown);
+   }
++  if (format === 'word-math') {
++    // 本机扩展：服务端用 Pandoc 导出，公式成为 Word 原生公式（OMML）。
++    // 前端自带的 Word 导出把公式保留成 LaTeX 源码纯文本，两者定位不同。
++    const response = await fetch('/api/export/word', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ markdown: input.markdown, name: input.name }),
++    });
++    if (!response.ok) {
++      const payload = (await response.json().catch(() => ({}))) as { error?: string };
++      throw new Error(payload.error || 'imageParseDownloadFailed');
++    }
++    return response.blob();
++  }
+   if (format === 'markdown')
+     return new Blob([input.markdown], { type: 'text/markdown;charset=utf-8' });
+ 
+diff --git a/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts b/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts
+index 0e3040b..e97ad51 100644
+--- a/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts
++++ b/webdemo/frontend/src/pages/playground/utils/imageParseFeatureFlags.ts
+@@ -1,7 +1,11 @@
+ /**
+- * Document-parsing feature flags. The review entry is currently hidden, and historical-result compatibility is kept.
++ * Document-parsing feature flags.
++ *
++ * 本机改造：复核入口（低分块标注 / 质量分列表 / 一键重识别）默认是关的，
++ * 而它正是本机用 MiniCPM-OCR Jev 一致性分数驱动的那条链路，所以改为可用环境变量开关、默认打开。
++ * 设 VITE_IMAGE_PARSE_REVIEW=false 可以关回去。
+  */
+-export const IMAGE_PARSE_REVIEW_ENABLED = false;
++export const IMAGE_PARSE_REVIEW_ENABLED = import.meta.env.VITE_IMAGE_PARSE_REVIEW !== 'false';
+ 
+ /** Playground table merge is on by default; cross-page tables and adjacent tables in a single image share the build flag. */
+ export const IMAGE_PARSE_CROSS_PAGE_MERGE_ENABLED =
+diff --git a/webdemo/frontend/src/pages/playground/utils/imageParseRegenerationRequest.ts b/webdemo/frontend/src/pages/playground/utils/imageParseRegenerationRequest.ts
+index e298218..60ac838 100644
+--- a/webdemo/frontend/src/pages/playground/utils/imageParseRegenerationRequest.ts
++++ b/webdemo/frontend/src/pages/playground/utils/imageParseRegenerationRequest.ts
+@@ -1,5 +1,9 @@
+-import { regenerateImageParseV4 } from '@/api/map/imageParseV2';
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { type ImageParseSource } from '@/api/map/imageParseSource';
++import { IMAGE_PARSE_LOCAL_BACKEND } from '@/api/map/request';
+ import type { ImageParseLayoutBlock } from './imageParseSample';
+ 
+ interface BlockGenerationInput {
+@@ -13,7 +17,47 @@ interface BlockGenerationInput {
+   pageIndex: number;
+ }
+ 
+-/** Real v4 uses only a whole-page reference issued by the server; without proof of origin it must be explicitly unavailable. */
++/**
++ * Local single-block recompute: the backend crops the block from the page image,
++ * re-recognizes it with MiniCPM-OCR 1.0 and re-scores it with Jev, so the number
++ * that comes back is on the same scale as the one already on screen.
++ */
++async function regenerateLocalBlock(
++  input: BlockGenerationInput,
++  original: ImageParseLayoutBlock,
++  signal: AbortSignal,
++): Promise<{ markdown: string; text: string; confidence: number }> {
++  const response = await fetch('/api/jev/regenerate', {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({
++      image: input.documentDataUrl,
++      // 归一化坐标；后端按页面实际像素换算
++      bbox: [original.x, original.y, original.w, original.h],
++      label: original.label ?? original.kind,
++    }),
++    signal,
++  });
++  const payload = (await response.json().catch(() => ({}))) as {
++    error?: string;
++    markdown?: string;
++    text?: string;
++    prob_1?: number | null;
++  };
++  if (!response.ok) {
++    throw new Error(payload.error || 'imageParseRegenerateFailed');
++  }
++  const markdown = payload.markdown ?? payload.text ?? '';
++  const confidence = payload.prob_1 ?? original.confidence ?? 0;
++  return { markdown, text: markdown, confidence };
++}
++
++/**
++ * Real v4 uses only a whole-page reference issued by the server; without proof of origin it must be explicitly unavailable.
++ *
++ * 本机改造：本地后端自己就是唯一的服务端，不存在"页面凭证"这一层，
++ * 所以本机走本地重识别通道；只有非本机部署才要求 source + secret。
++ */
+ export function imageParseBlockGenerator(
+   input: BlockGenerationInput,
+   original: ImageParseLayoutBlock,
+@@ -22,9 +66,13 @@ export function imageParseBlockGenerator(
+ ) {
+   return async (attempt: number, currentBest: ImageParseLayoutBlock) => {
+     const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(300_000)]);
++    if (IMAGE_PARSE_LOCAL_BACKEND) {
++      return regenerateLocalBlock(input, original, requestSignal);
++    }
+     if (!input.source) throw new Error('imageParseRegenerateSourceMissing');
+     if (input.pageIndex !== input.source.pageIndex)
+       throw new Error('imageParseRegenerateSourceInvalid');
++    const { regenerateImageParseV4 } = await import('@/api/map/imageParseV2');
+     return regenerateImageParseV4(input.source, original, requestSignal, input.model, input.secret);
+   };
+ }
+diff --git a/webdemo/frontend/vite.config.ts b/webdemo/frontend/vite.config.ts
+index 01f7c72..910fefa 100644
+--- a/webdemo/frontend/vite.config.ts
++++ b/webdemo/frontend/vite.config.ts
+@@ -1,3 +1,7 @@
++/**
++ * 本机改造：本文件在上游 OpenBMB/MiniCPM-OCR 版本基础上被修改。
++ * Apache-2.0 §4(b) 要求被修改的文件声明改动；完整改动清单见 E:\OCR\CHANGES.md
++ */
+ import { fileURLToPath, URL } from 'node:url';
+ import { defineConfig, loadEnv } from 'vite';
+ import react from '@vitejs/plugin-react';
+@@ -72,6 +76,16 @@ export default defineConfig(({ mode }) => {
+           target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
+           changeOrigin: true,
+         },
++        // 本机扩展：Jev 单块重识别 + 重新打分（见 backend/jev_regenerate.py）
++        '/api/jev': {
++          target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
++          changeOrigin: true,
++        },
++        // 本机扩展：Pandoc 导出 Word（公式为原生 OMML）
++        '/api/export': {
++          target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
++          changeOrigin: true,
++        },
+         '/v1': {
+           target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
+           changeOrigin: true,
+@@ -94,6 +108,16 @@ export default defineConfig(({ mode }) => {
+           target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
+           changeOrigin: true,
+         },
++        // 本机扩展：Jev 单块重识别 + 重新打分
++        '/api/jev': {
++          target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
++          changeOrigin: true,
++        },
++        // 本机扩展：Pandoc 导出 Word（公式为原生 OMML）
++        '/api/export': {
++          target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
++          changeOrigin: true,
++        },
+         '/v1': {
+           target: process.env.VITE_OCR_TARGET ?? 'http://127.0.0.1:8966',
+           changeOrigin: true,

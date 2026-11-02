@@ -104,6 +104,7 @@ git apply --whitespace=nowarn E:\OCR\upstream-local.patch
 | `scripts\apply_license_notices.py` | 给被修改的上游文件批量加 §4(b) 声明（幂等） |
 | `scripts\normalize_eol.py` | 把被改文件行尾统一回 LF（只动行尾，其余字节不变） |
 | `scripts\make_patch.py` | 生成并**自证** `upstream-local.patch`（apply --check + 实际 apply 后逐文件比对 MD5） |
+| `scripts\health_check.ps1` | 全链路自检：静态（文件/依赖/许可/前端产物）+ 动态（四个服务/显存/Jev 是否在 CPU/官方三例分数口径/Word 导出/静态托管） |
 | `upstream-local.patch` | 本机改造的标准 unified diff，可直接打到新的上游检出上 |
 
 ---

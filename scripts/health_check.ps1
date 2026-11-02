@@ -146,12 +146,12 @@ else {
   else { Skip '前端静态托管（SPA 路由）' "HTTP $($r.Code)" }
 
   # 2.3 显存
-  $smi = (& nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>&1) -join ''
-  if ($smi -match '(\d+)\s*MiB\s*/\s*(\d+)MiB') {
+  $smi = (& nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>&1) -join ' '
+  if ($smi -match '(\d+)\s*MiB\s*,\s*(\d+)\s*MiB') {
     $used = [int]$Matches[1]; $free = [int]$Matches[2]
     if ($used -lt 3400) { Ok '显存占用' "$used / 4096 MiB（余 $free）" }
     else { Bad '显存占用' "$used / 4096 MiB，太高（Jev 可能又跑上 GPU 了）" }
-  } else { Skip '显存占用' 'nvidia-smi 不可用' }
+  } else { Skip '显存占用' "nvidia-smi 输出无法解析: $smi" }
 
   # 2.4 Jev 是否在 CPU
   $eng = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
@@ -174,7 +174,19 @@ else {
   } else { Skip 'Jev 官方三例分数口径' '引擎没在跑' }
 
   # 2.6 Word 导出（公式是否为原生 OMML）
-  $md = "## 自检`n`n公式：`$\$E=mc^2\$\$`n`n| 项目 | 数值 |`n|---|---|`n| 甲 | 1 |"
+  # 注意：公式不能包在反引号里，否则 pandoc 当成行内代码，不会转成公式。
+  # 这里用单引号 here-string，避免 PowerShell 把 $$ 当变量插值。
+  $md = @'
+## 自检
+
+公式：
+
+$$E=mc^2$$
+
+| 项目 | 数值 |
+|---|---|
+| 甲 | 1 |
+'@
   $payload = @{ markdown = $md } | ConvertTo-Json
   $out = "$env:TEMP\healthcheck.docx"
   $code = (& curl.exe -sS --noproxy 127.0.0.1 -o $out -w '%{http_code}' -H 'Content-Type: application/json' --data-binary $payload 'http://127.0.0.1:8966/api/export/word' 2>&1) -join ''

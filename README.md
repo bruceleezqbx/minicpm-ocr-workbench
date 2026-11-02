@@ -88,10 +88,12 @@ E:\OCR
 │  ├─ fetch-ollama.ps1     下载并解压 Ollama
 │  ├─ apply_license_notices.py  给改过的上游文件批量加 Apache-2.0 §4(b) 改动声明
 │  ├─ normalize_eol.py     把被改文件行尾统一回 LF（与上游一致）
-│  └─ make_patch.py        生成并自证 upstream-local.patch
+│  ├─ make_patch.py        生成并自证 upstream-local.patch
+│  └─ health_check.ps1     全链路自检（静态 + 动态）
 ├─ runs\                   每次解析的产物：summary.json / per_page_metrics.csv / 分页 Markdown / 裁块
 ├─ logs\                   ollama-gpu.log、jev-engine.log、jev-score.log
 ├─ work\                   样例、输出、质检报告
+├─ .git\                   本机层的 git 仓库（上游副本与模型权重不入库）
 ├─ start_desktop.bat       ★ 桌面版一键入口（双击这个）
 ├─ upstream-local.patch    本机改造的标准 unified diff（可重放到新的上游检出上）
 ├─ CHANGES.md              本机改造清单（兼作 Apache-2.0 §4(b) 声明索引）
@@ -418,6 +420,7 @@ pywebview 6.2.1 + 系统自带的 **Edge WebView2 Runtime**（本机 156.0.4314.
 | 改前端代码时用开发模式 | 同上加 `--dev`（额外起 Vite，从 5173 进，可热更新） |
 | 无人值守自检 | 同上加 `--selftest`（开窗 → 读页面状态 → 关窗） |
 | 退出后保留服务 | 同上加 `--keep` |
+| **全链路体检** | `pwsh -File E:\OCR\scripts\health_check.ps1`（加 `-Start` 会先拉起服务再查） |
 
 ### 改了前端要重新构建
 
@@ -467,7 +470,62 @@ pwsh -File E:\OCR\scripts\build-frontend.ps1
 
 ---
 
-## 9. 已知限制
+## 9. 许可与合规
+
+### 上游许可
+
+[OpenBMB/MiniCPM-OCR](https://github.com/OpenBMB/MiniCPM-OCR) 整体采用 **Apache License 2.0**，
+**涵盖代码、文档，以及 MiniCPM-OCR 1.0 与 MiniCPM-OCR Jev 的模型权重**。
+上游 README 的 License 章节原文：
+
+> The entire project is released under the [Apache License 2.0](./LICENSE),
+> including code, documentation, and model weights for MiniCPM-OCR 1.0 and MiniCPM-OCR Jev.
+
+仓库根 `LICENSE` 与 `sdk/LICENSE` 都是同一份 Apache-2.0 全文；
+GitHub API 也确认 `"license": {"spdx_id": "Apache-2.0"}`。
+
+### 本仓许可
+
+本机部署层同样以 **Apache License 2.0** 发布 —— `E:\OCR\LICENSE` 就是上游那份原文（逐字节一致，
+自检脚本会校验这一点）。理由很直接：本层包含并改编了上游的 Apache-2.0 代码，
+按 Apache-2.0 第 4 条，衍生作品必须沿用同一许可。
+
+### Apache-2.0 第 4 条要求的落实
+
+| 条款要求 | 本仓怎么满足 |
+|---|---|
+| 4(a) 给接收者一份 License | `E:\OCR\LICENSE`（Apache-2.0 全文） |
+| 4(b) 被修改的文件要有**醒目的改动声明** | 21 个被修改/新增的上游文件，头部都加了「本机改造 / Apache-2.0 §4(b)」声明；清单见 `CHANGES.md` |
+| 4(c) 保留原有的版权与归属声明 | `NOTICE` 中保留 `Copyright OpenBMB` |
+| 4(d) NOTICE 文件 | 上游没有 NOTICE 文件；本层新建 `NOTICE` 声明改编关系与归属 |
+
+声明是幂等脚本批量加的（`scripts\apply_license_notices.py`），改动过的文件都过了
+`tsc --noEmit` 与 Python 语法 + docstring 复验。
+
+### 第三方组件
+
+| 组件 | 许可 | 说明 |
+|---|---|---|
+| MiniCPM-OCR 1.0 / Jev 权重 | Apache-2.0 | 上游声明权重同许可 |
+| Ollama 0.40.12 | MIT | `sources\ollama-0.40.12` |
+| llama.cpp b12032 | MIT | `sources\llama-b12032` |
+| Pandoc 3.13 | GNU GPL v2（官方 zip 内附 `COPYING.rtf`） | 单独可执行文件，未修改未链接 |
+| Python / Node 依赖 | 各自原始许可 | 各 venv 与 `node_modules` 内自带 LICENSE |
+
+### 版本控制
+
+`E:\OCR` 是独立的 git 仓库（分支 `main`）。上游仓库副本**不入库**
+（`sources/` 在 `.gitignore` 里），它的改动靠 `upstream-local.patch` 回溯——
+这个补丁打过 `git apply --check`，并且实际 apply 后与当前副本逐字节一致。
+
+```powershell
+git -C E:\OCR log --oneline     # 查看本机层的提交历史
+git -C E:\OCR status             # 工作区状态
+```
+
+---
+
+## 10. 已知限制
 
 1. **内存**：本机 16GB 被 AutoCAD / 微信 / QQ 等占满时，PaddleX 会报
    `MemoryError: bad allocation`。批量跑之前先关掉占内存的程序，或用 `-KeepModel` 之外
@@ -488,7 +546,7 @@ pwsh -File E:\OCR\scripts\build-frontend.ps1
 
 ---
 
-## 10. 质量验证记录
+## 11. 质量验证记录
 
 样例图 `E:\OCR\work\sample_doc.png`（合成：中文正文 + 5×5 报价表 + 2 个公式 +
 手写签名 + 红色印章 + 轻微倾斜/模糊），解析结果 `E:\OCR\work\out-ollama.md`：
@@ -501,7 +559,7 @@ pwsh -File E:\OCR\scripts\build-frontend.ps1
 
 ---
 
-## 11. 后续可做
+## 12. 后续可做
 
 - 换更强的卡（如 8GB+ 的 RTX 系列）后放开 `num_ctx=8192` 并开多 worker，可再快数倍；
 - 把 Jev 的低分块自动回流成 1.0 的重识别候选（多候选打分择优，官方称 best-of-N）；

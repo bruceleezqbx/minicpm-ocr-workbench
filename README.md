@@ -3,6 +3,11 @@
 在本机把 MiniCPM-OCR 1.0 跑成「整页 PDF/图片 → Markdown」的流水线：Ollama 提供推理服务，
 `minicpm-ocr` SDK 做版面检测与结果组装。
 
+> **这是非官方的本机部署与改造**，不是 OpenBMB 官方项目。
+> 上游项目：<https://github.com/OpenBMB/MiniCPM-OCR>（Apache License 2.0，Copyright OpenBMB）。
+> 本仓的改编内容与归属声明见 [`CHANGES.md`](CHANGES.md) 与 [`NOTICE`](NOTICE)。
+> 官方功能与支持请以上游仓库为准。
+
 ---
 
 ## 1. 现状一览
@@ -15,7 +20,7 @@
 | 视觉投影 | `mmproj-model-f16-4x.gguf`（901 MB） | 4× downsample 模式 |
 | DSpark draft | `dspark-MiniCPM-OCR-1_0-Q8_0.gguf`（327 MB） | 推测解码，实测接受率 0.07–0.60 |
 | SDK | `minicpm-ocr` 1.0.3 | `E:\OCR\.minicpm-ocr\Scripts\minicpmvocr.exe` |
-| 版面检测 | PP-DocLayoutV3（paddlex 3.4.2 + paddlepaddle 3.3.1） | `C:\Users\lf1\.paddlex\official_models\PP-DocLayoutV3` |
+| 版面检测 | PP-DocLayoutV3（paddlex 3.4.2 + paddlepaddle 3.3.1） | `%USERPROFILE%\.paddlex\official_models\PP-DocLayoutV3` |
 | 服务地址 | `http://127.0.0.1:18499` | 模型名 `minicpm-ocr` |
 | Word 导出 | Pandoc 3.13 便携版 | `E:\OCR\sources\pandoc\pandoc-3.13\pandoc.exe`，公式转 Word 原生公式 |
 | 桌面壳 | pywebview 6.2.1 + 系统 Edge WebView2 | `E:\OCR\.desktop`，双击 `start_desktop.bat` 即用 |

@@ -17,7 +17,7 @@ rem ===========================================================================
 setlocal
 set "OCR_ROOT=E:\OCR"
 set "DESKTOP_PY=%OCR_ROOT%\.desktop\Scripts\python.exe"
-set "BASE_PY=C:\Users\lf1\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe"
+set "BASE_PY=%USERPROFILE%\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe"
 set "PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/"
 set "FRONTEND_DIST=%OCR_ROOT%\sources\MiniCPM-OCR-main\webdemo\frontend\dist\index.html"
 

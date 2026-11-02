@@ -7,6 +7,8 @@
 > 上游项目：<https://github.com/OpenBMB/MiniCPM-OCR>（Apache License 2.0，Copyright OpenBMB）。
 > 本仓的改编内容与归属声明见 [`CHANGES.md`](CHANGES.md) 与 [`NOTICE`](NOTICE)。
 > 官方功能与支持请以上游仓库为准。
+>
+> 公开副本：<https://github.com/bruceleezqbx/minicpm-ocr-workbench>
 
 ---
 
